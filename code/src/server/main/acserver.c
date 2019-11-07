@@ -55,11 +55,7 @@ static e_srvrunstat_ acsrv_run_server_impl(p_srvhndl_ srvhndlp, int argc, const 
     }
 	
     /* Start Server */
-    if (! acsrv_start_server(srvhndlp)) {
-	return SRV_RUNSTAT_START_FAILED;
-    }
-  
-    return SRV_RUNSTAT_OK; 
+    return acsrv_start_server(srvhndlp); 
 }
 
 e_srvrunstat_ acsrv_run_server(p_srvhndl_ srvhndlp, int argc, const char **argv)
