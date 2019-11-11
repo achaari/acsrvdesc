@@ -2,7 +2,12 @@ typedef struct srvhndl_ {
     p_ptrhnd_ srvdatap;
 } ac_srvhndl_;
 
-static e_srvrunstat_ acsrv_start_server(p_srvhndl_ srvhndlp)
+typedef struct srvthread_ {
+    p_srvhndl_	 srvhndp;
+    p_threadhnd_ mngthreadhnp;
+} ac_srvthread_;
+
+static eac_srvrunstat_ acsrv_start_server(p_srvhndl_ srvhndlp)
 {
     /* Allocate Server Main Session */
     if (! acsrv_allocate_session(srvhndlp, MAIN_SESSION, NULL)) {
@@ -10,22 +15,22 @@ static e_srvrunstat_ acsrv_start_server(p_srvhndl_ srvhndlp)
     }
 
     /* Create Process thread */
-    if (! acsrv_create_thread(srvhndlp, NULL, ACSRV_PROCESS_THREAD, NULL)) {
+    if (! acsrv_create_srvthread(srvhndlp, NULL, ACSRV_PROCESS_THREAD, NULL)) {
 	return SRV_RUNSTAT_START_PROCESS_THTEAD_FAILED;
     }
 
     /* Create Management thread */
-    if (! acsrv_create_thread(srvhndlp, NULL, ACSRV_MANAGEMENT_THREAD, NULL)) {
+    if (! acsrv_create_srvthread(srvhndlp, NULL, ACSRV_MANAGEMENT_THREAD, NULL)) {
 	return SRV_RUNSTAT_START_MANAGEMENT_THTEAD_FAILED;
     }
 	
     /* Create Listening thread for non-secure connection */
-    if (rvhndp->configp->nonsecurectxb && ! acsrv_create_thread(srvhndlp, NULL, ACSRV_LISTENING_THREAD, NULL)) {
+    if (rvhndp->configp->nonsecurectxb && ! acsrv_create_srvthread(srvhndlp, NULL, ACSRV_LISTENING_THREAD, NULL)) {
 	return SRV_RUNSTAT_START_LISTENING_THREAD_FAILED;
     }
 	
     /* Create Listening thread for secure connection */
-    if (rvhndp->configp->securectxb && ! acsrv_create_thread(srvhndlp, NULL, ACSRV_SECURE_LISTENING_THREAD, NULL)) {
+    if (rvhndp->configp->securectxb && ! acsrv_create_srvthread(srvhndlp, NULL, ACSRV_SECURE_LISTENING_THREAD, NULL)) {
 	return SRV_RUNSTAT_START_LISTENING_THREAD_FAILED;
     }
 	
@@ -36,7 +41,7 @@ static e_srvrunstat_ acsrv_start_server(p_srvhndl_ srvhndlp)
     return acsrv_terminate_loop(srvhndlp);
 }
 
-static e_srvrunstat_ acsrv_run_server_impl(p_srvhndl_ srvhndlp, int argc, const char **argv)
+static eac_srvrunstat_ acsrv_run_server_impl(p_srvhndl_ srvhndlp, int argc, const char **argv)
 {
     /* Initialize server */
     if (srvhndlp->initcbkfctp != nullcbk) {
@@ -103,29 +108,87 @@ p_srvhndl_ acsrv_alloc_server(ac_bool_ allowsslb, size_t datasizel, CBKHND freec
     return srvhndp;
 }
 
-static ac_bool_ acsrv_create_thread(p_srvhndl_ srvhndlp, p_ptrhnd_ threadownerp, eac_srvthread_type_ threadtype, p_ptrhnd_ threaddatap)
+static ac_bool_ acsrv_run_srvthread(p_srvhndl_ srvhndlp, p_srvthread_ threadhndlp, acp_threadexe_ threadexep)
 {
-    acp_srvthread_ threadhndlp;
+    while (acsrv_srvthread_process_next(srvhndlp, threadhndlp)) {
+
+	/* Start new thread */
+	if (! acthread_start_thread(srvhndlp, srvsrv_manage_srvthread_exe, TRUE, threadexep)) {
+	    return FALSE;
+	}
+    }
+
+    return TRUE;
+}
+
+static ac_bool_ acsrv_start_srvthread_workers(p_srvhndl_ srvhndlp, p_srvthread_ threadhndlp)
+{
+    int idx = 1, maxidx = 1;
+
+    /* Get Max Server Thread Worker occurrences */
+    maxidx = acsrv_getmax_occ(srvhndlp, threadhndlp->threadtyp);
+
+    /* Start Server Thread Workers */
+    for (; idx <= maxidx; idx++) {
+	if (! acthread_start_thread(srvhndlp, srvsrv_manage_srvthread_worker, FALSE, threadhndlp)) {
+	    return FALSE;
+	}
+    }
+
+    /* Wait for Server Thread Workers termination */
+    return acsrv_wait_for_srvthread_workers(srvhndlp, threadhndlp);
+}
+
+static ac_bool_ acsrv_start_srvthread(p_srvhndl_ srvhndlp, p_srvthread_ threadhndlp)
+{
+    if (! acthread_startsuspend_thread(srvhndlp, srvsrv_manage_srvthread, threadhndlp)) {
+	return FALSE;
+    }
+
+    if (! acsrv_add_to_waiting_thread(srvhndlp, threadhndlp)) {
+	acsrv_terminate_srvthread(srvhndlp, threadhndlp, TRUE);
+	return FALSE;
+    }
+
+    /* Resume Server Thread Manager */
+    if (! acthread_resume_thread(srvhndlp, threadhndlp->mngthreadhnp)) {
+	acsrv_terminate_srvthread(srvhndlp, threadhndlp, TRUE); 
+	return FALSE;
+    }
+
+    acsrv_set_srvthread_inprocess(srvhndlp, threadhndlp);
+    return TRUE;
+}
+
+static ac_bool_ acsrv_create_srvthread(p_srvhndl_ srvhndlp, p_ptrhnd_ threadownerp, eac_srvthread_type_ threadtype, p_ptrhnd_ threaddatap)
+{
+    p_srvthread_ threadhndlp;
 
     if (threadtype == ACSRV_LISTENING_THREAD || threadtype == ACSRV_SECURE_LISTENING_THREAD) {
 	/* Create Server Listening thread */
-	threadhndlp = acsrv_alloc_listening_thread(srvhndlp, threadtype);
+	threadhndlp = acsrv_alloc_listening_srvthread(srvhndlp, threadtype);
     }
     else {
 	/* Create Server Processing thread */
-	threadhndlp = acsrv_alloc_process_thread(srvhndlp, threadtype, threadownerp, threaddatap);
+	threadhndlp = acsrv_alloc_process_srvthread(srvhndlp, threadtype, threadownerp, threaddatap);
     }
 
+    if (threadhndlp == NULL) {
+	return FALSE;
+    } 
+    
     /* Register Server Thread */
-    if (threadhndlp == NULL || !acsrv_register_thread(srvhndlp, threadhndlp)) {
+    if (! acsrv_register_srvthread(srvhndlp, threadhndlp)) {
+	
+	acsrv_terminate_srvthread(srvhndlp, threadhndlp, TRUE);
 	return FALSE;
     }
 
     /* Start Server Thread */
-    return acsrv_start_thread(srvhndlp, threadhndlp);
+    return acsrv_start_srvthread(srvhndlp, threadhndlp);
 }
 
-static eac_thread_exit_flag_ acsrv_listening_thread(p_srvhndl_ srvhndlp, acp_srvthread_ threadhndlp)
+static eac_thread_exit_flag_ acsrv_listening_srvthread(p_srvhndl_ srvhndlp, p_srvthread_ threadhndlp)
 {
     while (acsrv_still_listening(srvhndlp, threadhndlp)) {
 
