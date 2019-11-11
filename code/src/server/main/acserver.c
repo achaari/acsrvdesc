@@ -1,3 +1,7 @@
+typedef struct srvhndl_ {
+    p_ptrhnd_ srvdatap;
+} ac_srvhndl_;
+
 static e_srvrunstat_ acsrv_start_server(p_srvhndl_ srvhndlp)
 {
     /* Allocate Server Main Session */
@@ -82,10 +86,24 @@ e_srvrunstat_ acsrv_run_server(p_srvhndl_ srvhndlp, int argc, const char **argv)
 
 p_srvhndl_ acsrv_alloc_server(ac_bool_ allowsslb, size_t datasizel, CBKHND freecbkfp)
 {
-    return NULL;
+    p_srvhndl_ srvhndp = acuti_mem_alloc(sizeof(ac_srvhndl_));
+
+    if (srvhndp == NULL) {
+	return NULL;
+    }
+
+    if (datasizel > 0) {
+	srvhndp->srvdatap = acuti_mem_alloc_ptrhnd(datasizel, freecbkfp);
+	if (srvhndp->srvdatap == NULL) {
+	    acsrv_free_server(&srvhndp);
+	    return NULL;
+	}
+    }
+
+    return srvhndp;
 }
 
-ac_bool_ acsrv_create_thread(p_srvhndl_ srvhndlp, p_ptrhnd_ threadownerp, e_srvthread_type_ threadtype, p_ptrhnd_ threaddatap)
+static ac_bool_ acsrv_create_thread(p_srvhndl_ srvhndlp, p_ptrhnd_ threadownerp, eac_srvthread_type_ threadtype, p_ptrhnd_ threaddatap)
 {
     acp_srvthread_ threadhndlp;
 
@@ -105,4 +123,23 @@ ac_bool_ acsrv_create_thread(p_srvhndl_ srvhndlp, p_ptrhnd_ threadownerp, e_srvt
 
     /* Start Server Thread */
     return acsrv_start_thread(srvhndlp, threadhndlp);
+}
+
+static eac_thread_exit_flag_ acsrv_listening_thread(p_srvhndl_ srvhndlp, acp_srvthread_ threadhndlp)
+{
+    while (acsrv_still_listening(srvhndlp, threadhndlp)) {
+
+	if (acsrv_accept_connextion(srvhndlp, threadhndlp)) {
+
+	    /* Create new Server Session */
+	    if (! acsrv_create_new_session(srvhndlp, threadhndlp)) {
+
+		/* Reply Server Error and close current connexion */
+		acsrv_srv_error_reply(srvhndlp, acsrv_get_thread_connexion(threadhndlp), 
+				      SRV_ERROR_FATAL, SRV_REPLY_ERROR_FAILED_SESSION);
+	    }
+	}
+    }
+
+    return threadhndlp->exitflagb;
 }
