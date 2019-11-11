@@ -141,22 +141,29 @@ static ac_bool_ acsrv_start_srvthread_workers(p_srvhndl_ srvhndlp, p_srvthread_ 
 
 static ac_bool_ acsrv_start_srvthread(p_srvhndl_ srvhndlp, p_srvthread_ threadhndlp)
 {
+    /* Start Management thread for Server Threads in suspend */
     if (! acthread_startsuspend_thread(srvhndlp, srvsrv_manage_srvthread, threadhndlp)) {
 	return FALSE;
     }
 
+    /* Add to Server waining Thread list */
     if (! acsrv_add_to_waiting_thread(srvhndlp, threadhndlp)) {
-	acsrv_terminate_srvthread(srvhndlp, threadhndlp, TRUE);
 	return FALSE;
     }
 
-    /* Resume Server Thread Manager */
-    if (! acthread_resume_thread(srvhndlp, threadhndlp->mngthreadhnp)) {
-	acsrv_terminate_srvthread(srvhndlp, threadhndlp, TRUE); 
+    if (acsrv_check_immediate_start(srvhndlp, threadhndlp)) {
+	/* Resume Server Thread Manager */
+	if (! acthread_resume_thread(srvhndlp, threadhndlp->mngthreadhnp)) {
+	    return FALSE;
+	}
+
+	/* Set Current server thread in process */
+	acsrv_set_srvthread_inprocess(srvhndlp, threadhndlp);
+    }
+    else if (! acsrv_add_to_delayed_start(srvhndlp, threadhndlp)) {
 	return FALSE;
     }
 
-    acsrv_set_srvthread_inprocess(srvhndlp, threadhndlp);
     return TRUE;
 }
 
@@ -184,8 +191,14 @@ static ac_bool_ acsrv_create_srvthread(p_srvhndl_ srvhndlp, p_ptrhnd_ threadowne
 	return FALSE;
     }
 
-    /* Start Server Thread */
-    return acsrv_start_srvthread(srvhndlp, threadhndlp);
+    /* Start Server Thread  (immediate or delayed run) */
+    if (! acsrv_start_srvthread(srvhndlp, threadhndlp)) {
+
+	acsrv_terminate_srvthread(srvhndlp, threadhndlp, TRUE);
+	return FALSE;
+    }
+
+    return TRUE;
 }
 
 static eac_thread_exit_flag_ acsrv_listening_srvthread(p_srvhndl_ srvhndlp, p_srvthread_ threadhndlp)
